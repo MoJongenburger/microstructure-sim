@@ -10,10 +10,8 @@
 
 namespace msim {
 
-// Forward declaration (so OrderBook can declare it as a friend)
 class MatchingEngine;
 
-// A lightweight “Level 2” view: price + total quantity + number of resting orders.
 struct LevelSummary {
   Price    price{};
   Qty      total_qty{};
@@ -22,25 +20,25 @@ struct LevelSummary {
 
 class OrderBook {
 public:
-  // Insert a *resting* limit order. Returns false if it would cross the spread.
   bool add_resting_limit(Order o);
 
-  // Top of book
+  // Cancel/remove a resting order by id (O(total orders) for now)
+  bool cancel(OrderId id);
+
+  // Modify only allows REDUCE quantity (common exchange rule). Returns false otherwise.
+  bool modify(OrderId id, Qty new_qty);
+
   std::optional<Price> best_bid() const noexcept;
   std::optional<Price> best_ask() const noexcept;
 
-  // Crossed-book check (should stay false if you only add resting orders correctly)
   bool is_crossed() const noexcept;
 
-  // L2 depth snapshot: top N levels for a side
   std::vector<LevelSummary> depth(Side side, std::size_t levels) const;
 
-  // Quick stats
   bool empty(Side side) const noexcept;
   std::size_t level_count(Side side) const noexcept;
 
 private:
-  // Allow MatchingEngine to manipulate book internals efficiently
   friend class MatchingEngine;
 
   struct Level {
@@ -54,13 +52,18 @@ private:
   BidMap bids_;
   AskMap asks_;
 
-  // Helper: get references to correct side container
   BidMap& bids() noexcept { return bids_; }
   AskMap& asks() noexcept { return asks_; }
   const BidMap& bids() const noexcept { return bids_; }
   const AskMap& asks() const noexcept { return asks_; }
 
   bool would_cross(const Order& o) const noexcept;
+
+  // Helpers (scan-based for MVP)
+  bool cancel_in_bids_(OrderId id);
+  bool cancel_in_asks_(OrderId id);
+  bool modify_in_bids_(OrderId id, Qty new_qty);
+  bool modify_in_asks_(OrderId id, Qty new_qty);
 };
 
 } // namespace msim
