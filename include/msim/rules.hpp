@@ -12,7 +12,7 @@ namespace msim {
 enum class MarketPhase : uint8_t {
   Continuous = 0,
   Halted     = 1,
-  Auction    = 2,  // used for volatility auction
+  Auction    = 2,  // volatility / reopen auctions
   TradingAtLast = 3,
   ClosingAuction = 4,
   Closed = 5
@@ -29,7 +29,6 @@ enum class RejectReason : uint8_t {
 
   SelfTradePrevented,
 
-  // Step 12
   NoReferencePrice,
   PriceNotAtLast
 };
@@ -61,6 +60,13 @@ struct RulesConfig {
   bool enable_volatility_interruption{true};
   int32_t band_bps{1250}; // 12.5%
   Ts vol_auction_duration_ns{5'000'000'000LL};
+
+  // Step 15: circuit breaker
+  bool queue_orders_during_halt{true};
+  bool enable_circuit_breaker{true};
+  int32_t cb_drop_bps{2500}; // 25%
+  Ts cb_halt_duration_ns{5'000'000'000LL};
+  Ts cb_reopen_auction_duration_ns{5'000'000'000LL};
 };
 
 class RuleSet {
