@@ -31,11 +31,9 @@ public:
   const RuleSet& rules() const noexcept { return rules_; }
   RuleSet& rules_mut() noexcept { return rules_; }
 
-  // Session controls
   void start_trading_at_last(Ts end_ts) noexcept;
   void start_closing_auction(Ts end_ts) noexcept;
 
-  // Step 13: finalize auctions / transitions even if no order arrives at the end timestamp
   std::vector<Trade> flush(Ts ts);
 
   MatchResult process(Order incoming);
@@ -45,27 +43,34 @@ private:
   RuleSet rules_{};
   TradeId next_trade_id_{1};
 
-  // Auction/TAL state
   std::vector<Order> auction_queue_{};
   Ts auction_end_ts_{0};
   Ts tal_end_ts_{0};
+
+  // Step 15: circuit breaker state
+  std::optional<Price> cb_ref_price_{};
+  Ts halt_end_ts_{0};
+  Ts reopen_auction_end_ts_{0};
 
   MatchResult process_market(Order incoming);
   MatchResult process_limit(Order incoming);
 
   Qty available_liquidity(const Order& taker) const noexcept;
 
-  // Band helpers
+  // band helpers
   std::optional<Price> reference_price() const noexcept;
   std::optional<Price> first_execution_price(const Order& incoming) const noexcept;
   bool breaches_price_band(Price exec_px, Price ref_px) const noexcept;
   bool should_trigger_volatility_auction(const Order& incoming) const noexcept;
 
-  // Auction uncross (Step 11)
+  // auction
   MatchResult queue_in_auction(Order incoming);
   std::vector<Trade> uncross_auction(Ts uncross_ts);
   std::optional<Price> compute_clearing_price() const noexcept;
   Qty executable_volume_at(Price px) const noexcept;
+
+  // circuit breaker
+  void maybe_trigger_circuit_breaker(std::span<const Trade> trades);
 
   void match_buy(MatchResult& out, Order& taker);
   void match_sell(MatchResult& out, Order& taker);
