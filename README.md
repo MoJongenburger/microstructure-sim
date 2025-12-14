@@ -22,13 +22,13 @@ This repository is built as a **research-grade microstructure sandbox**:
 - L2 depth snapshots (top-N levels)
 - Cancel and reduce-only modify (MVP scan-based implementation)
 
-### Order instructions (Step 8)
+### Order instructions 
 - **Time-in-Force:** GTC / IOC / FOK  
   - IOC: immediate execution, remainder canceled  
   - FOK: atomic — fills fully or does nothing
 - **Market-to-Limit:** remainder becomes a resting limit at last execution price (if any fill occurred)
 
-### Rule / policy layer (Step 6–7)
+### Rule / policy layer 
 - Market phase support (Continuous / Halted / Auction foundation)
 - Structured rejects:
   - invalid order
@@ -37,7 +37,7 @@ This repository is built as a **research-grade microstructure sandbox**:
   - lot size / min quantity violations
 - Tracks last trade price (reference foundation for price bands / halts later)
 
-### Self-Trade Prevention (Step 9)
+### Self-Trade Prevention 
 - STP modes:
   - None
   - CancelTaker
