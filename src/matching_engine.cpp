@@ -16,10 +16,24 @@ Trade MatchingEngine::make_trade(Ts ts, Price px, Qty q, OrderId maker, OrderId 
 
 MatchResult MatchingEngine::process(Order incoming) {
   MatchResult out{};
-  if (!is_valid_order(incoming)) return out;
 
-  if (incoming.type == OrderType::Market) return process_market(std::move(incoming));
-  return process_limit(std::move(incoming));
+  // Centralized policy validation (future: tick/lot, bands, STP, rate limits, etc.)
+  const auto decision = rules_.pre_accept(incoming);
+  if (!decision.accept) {
+    out.status = OrderStatus::Rejected;
+    out.reject_reason = decision.reason;
+    return out;
+  }
+
+  if (incoming.type == OrderType::Market) {
+    out = process_market(std::move(incoming));
+  } else {
+    out = process_limit(std::move(incoming));
+  }
+
+  // Policy state update (future: reference price, circuit breaker checks, etc.)
+  rules_.on_trades(out.trades);
+  return out;
 }
 
 MatchResult MatchingEngine::process_market(Order incoming) {
@@ -29,7 +43,10 @@ MatchResult MatchingEngine::process_market(Order incoming) {
   if (incoming.side == Side::Buy) match_buy(out, incoming);
   else match_sell(out, incoming);
 
+  out.filled_qty = 0;
   for (const auto& tr : out.trades) out.filled_qty += tr.qty;
+
+  // Market orders never rest; remainder is implicitly cancelled
   return out;
 }
 
@@ -40,11 +57,14 @@ MatchResult MatchingEngine::process_limit(Order incoming) {
   if (incoming.side == Side::Buy) match_buy(out, incoming);
   else match_sell(out, incoming);
 
+  out.filled_qty = 0;
   for (const auto& tr : out.trades) out.filled_qty += tr.qty;
 
   // Remainder becomes resting, but ONLY if it no longer crosses
   if (incoming.qty > 0) {
-    if (book_.add_resting_limit(incoming)) out.resting = incoming;
+    if (book_.add_resting_limit(incoming)) {
+      out.resting = incoming;
+    }
   }
   return out;
 }
@@ -91,6 +111,7 @@ void MatchingEngine::match_sell(MatchResult& out, Order& taker) {
 
     auto& lvl = best_it->second;
 
+    // Defensive: should never happen, but keeps structure consistent
     if (lvl.q.empty()) {
       book_.bids_.erase(best_it);
       continue;
