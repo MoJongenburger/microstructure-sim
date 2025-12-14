@@ -23,9 +23,10 @@ TEST(Rules, RejectInvalidOrdersWithReason) {
 TEST(Rules, HaltQueuesOrdersWhenConfigured) {
   msim::RulesConfig cfg;
   cfg.enforce_halt = true;
-  cfg.queue_orders_during_halt = true; // NEW default behavior
+  cfg.queue_orders_during_halt = true;
 
-  msim::MatchingEngine eng(msim::RuleSet(cfg));
+  // IMPORTANT: braces avoid “most vexing parse”
+  msim::MatchingEngine eng{ msim::RuleSet{cfg} };
   eng.rules_mut().set_phase(msim::MarketPhase::Halted);
 
   msim::Order o{};
@@ -39,7 +40,7 @@ TEST(Rules, HaltQueuesOrdersWhenConfigured) {
 
   auto res = eng.process(o);
 
-  // Accepted (not rejected) because we queue during halts
+  // Accepted because we queue during halts
   EXPECT_EQ(res.status, msim::OrderStatus::Accepted);
   EXPECT_EQ(res.reject_reason, msim::RejectReason::None);
 }
@@ -47,9 +48,10 @@ TEST(Rules, HaltQueuesOrdersWhenConfigured) {
 TEST(Rules, RejectOrdersWhenMarketHaltedIfQueueDisabled) {
   msim::RulesConfig cfg;
   cfg.enforce_halt = true;
-  cfg.queue_orders_during_halt = false; // strict halt: reject everything
+  cfg.queue_orders_during_halt = false;
 
-  msim::MatchingEngine eng(msim::RuleSet(cfg));
+  // IMPORTANT: braces avoid “most vexing parse”
+  msim::MatchingEngine eng{ msim::RuleSet{cfg} };
   eng.rules_mut().set_phase(msim::MarketPhase::Halted);
 
   msim::Order o{};
