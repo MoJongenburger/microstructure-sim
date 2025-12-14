@@ -10,6 +10,9 @@
 
 namespace msim {
 
+// Forward declaration (so OrderBook can declare it as a friend)
+class MatchingEngine;
+
 // A lightweight “Level 2” view: price + total quantity + number of resting orders.
 struct LevelSummary {
   Price    price{};
@@ -37,6 +40,9 @@ public:
   std::size_t level_count(Side side) const noexcept;
 
 private:
+  // Allow MatchingEngine to manipulate book internals efficiently
+  friend class MatchingEngine;
+
   struct Level {
     std::deque<Order> q;
     Qty total_qty{0};
@@ -58,4 +64,3 @@ private:
 };
 
 } // namespace msim
-
