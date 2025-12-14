@@ -1,43 +1,66 @@
-# microstructure-sim
+# MSIM — Market Microstructure Simulator (C++20)
 
-Event-driven **limit order book** + **matching engine** simulator in modern C++20.
+A deterministic, event-driven **limit order book + matching engine** built in modern **C++20**, designed as a **microstructure research sandbox**.
 
-This repository is built as a **research-grade microstructure sandbox**:
-- deterministic replay of event streams
-- realistic order instructions (IOC/FOK/Market-to-Limit)
-- exchange-style admission rules (tick size + lot size)
-- self-trade prevention (STP)
-- CI-tested across Linux/Windows/macOS with sanitizers
+MSIM prioritizes **reproducibility, correctness, and extensibility**. The architecture deliberately separates:
+- **Core market mechanics** (order book + matching)
+- **Policy/rules layer** (admission checks, market phases, auctions, circuit breakers)
 
-> Goal: provide a clean, extensible foundation for later additions such as auctions (closing/volatility), price bands, circuit breakers, latency models, rate limits, and iceberg orders.
+This makes it possible to evolve from a clean “core exchange kernel” into a more realistic venue simulator without rewriting the engine.
+
+---
+
+## Why it’s built this way
+
+- **Deterministic replay**: microstructure experiments must be reproducible (same event stream → same trades).
+- **Separation of concerns**: matching logic stays minimal and testable; market rules are configurable.
+- **Safety through testing**: CI + unit tests allow aggressive feature iteration without breaking invariants.
+- **Phase-aware engine**: realistic venues are session-driven (continuous trading + auctions + halts). MSIM supports this model.
 
 ---
 
 ## Features implemented
 
-### Core matching + book
+### Core book + matching
 - Price–time priority **limit order book** (FIFO per price level)
 - **Market** and **Limit** orders
 - Partial fills and multi-level sweeps
 - L2 depth snapshots (top-N levels)
-- Cancel and reduce-only modify (MVP scan-based implementation)
+- Cancel + reduce-only modify
 
-### Order instructions 
+### Order instructions (exchange-style)
 - **Time-in-Force:** GTC / IOC / FOK  
-  - IOC: immediate execution, remainder canceled  
-  - FOK: atomic — fills fully or does nothing
-- **Market-to-Limit:** remainder becomes a resting limit at last execution price (if any fill occurred)
+  - IOC: execute immediately, remainder canceled  
+  - FOK: atomic — fills completely or does nothing
+- **Market-to-Limit:** if a market order partially fills, remainder becomes a resting limit at last execution price
 
-### Rule / policy layer 
-- Market phase support (Continuous / Halted / Auction foundation)
+### Rule / policy layer
 - Structured rejects:
   - invalid order
   - market halted
   - tick size violations
   - lot size / min quantity violations
-- Tracks last trade price (reference foundation for price bands / halts later)
+- Reference price tracking (last trade, mid fallback)
 
-### Self-Trade Prevention 
+### Market phases + auction mechanics
+- Phases supported (foundation integrated in engine):
+  - Continuous
+  - Auction (uncrossing)
+  - Trading-at-Last
+  - Closing Auction
+  - Halted (circuit breaker)
+- **Auction uncrossing** at a single clearing price:
+  - candidate prices derived from limit prices
+  - maximize executable volume
+  - tie-break by closest to reference price
+
+### Stability mechanisms (real-venue inspired)
+- **Volatility interruption foundation** (price band breach → enter auction)
+- **Circuit breaker halt + reopen auction**
+  - large downward move triggers halt
+  - transition into reopening auction
+
+### Self-Trade Prevention (STP)
 - STP modes:
   - None
   - CancelTaker
@@ -45,10 +68,16 @@ This repository is built as a **research-grade microstructure sandbox**:
 
 ### Experiment harness
 - Deterministic **Simulator** (stable ordering by timestamp + insertion order)
-- Stochastic **OrderFlowGenerator** (seeded RNG)
+- Seeded stochastic **OrderFlowGenerator**
 - CLI tool emits CSV:
   - `trades.csv`
   - `top.csv`
+
+### Engineering quality
+- CMake targets (library + CLI + tests)
+- GoogleTest suite
+- CI across Linux / Windows / macOS + Linux sanitizers (ASan/UBSan)
+- Optional warnings-as-errors builds
 
 ---
 
@@ -94,13 +123,7 @@ tests/               # gtests
 ## Roadmap (next)
 
 * O(1) cancel/modify via order-id index (locator map)
-* Price bands + volatility interruption (volatility auction)
-* Closing auction + trading-at-last phase
-* Circuit breaker halts (e.g., large downward move) + reopen auction
 * Latency model + message rate limits
-* Stop/stop-limit orders
+* Stop / stop-limit orders
 * Iceberg orders
 * Benchmarks + profiling + performance charts
-
-```
-```
