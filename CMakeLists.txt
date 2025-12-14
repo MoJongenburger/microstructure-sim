@@ -6,25 +6,16 @@ project(microstructure_sim
   LANGUAGES CXX
 )
 
-# -------- Options (professional-grade knobs) --------
+# ---------------- Options ----------------
 option(MSIM_ENABLE_WERROR "Treat warnings as errors" OFF)
 option(MSIM_ENABLE_SANITIZERS "Enable ASan/UBSan (Clang/GCC)" OFF)
 
+# ---------------- Language setup ----------------
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-# -------- Library target (headers now, sources later) --------
-add_library(msim
-  src/book.cpp
-)
-
-target_include_directories(msim PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
-msim_set_warnings(msim)
-msim_enable_sanitizers(msim)
-
-
-# -------- Warnings (high-signal for admissions) --------
+# ---------------- Warnings (define BEFORE use) ----------------
 function(msim_set_warnings target)
   if (MSVC)
     target_compile_options(${target} PRIVATE /W4 /permissive-)
@@ -44,7 +35,7 @@ function(msim_set_warnings target)
   endif()
 endfunction()
 
-# -------- Sanitizers (optional; enabled in CI on Linux) --------
+# ---------------- Sanitizers (define BEFORE use) ----------------
 function(msim_enable_sanitizers target)
   if (MSIM_ENABLE_SANITIZERS AND NOT MSVC)
     target_compile_options(${target} PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
@@ -52,12 +43,22 @@ function(msim_enable_sanitizers target)
   endif()
 endfunction()
 
-# -------- Testing (GoogleTest via FetchContent) --------
-include(FetchContent)
+# ---------------- Library: msim ----------------
+add_library(msim
+  src/book.cpp
+)
+
+target_include_directories(msim PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+msim_set_warnings(msim)
+msim_enable_sanitizers(msim)
+
+# ---------------- Testing ----------------
 include(CTest)
 enable_testing()
 
-# Recommended for MSVC CRT linkage compatibility
+include(FetchContent)
+
+# Recommended for MSVC CRT compatibility
 set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
 
 FetchContent_Declare(
@@ -70,7 +71,6 @@ add_executable(msim_tests
   tests/test_types.cpp
   tests/test_book.cpp
 )
-
 
 target_link_libraries(msim_tests PRIVATE msim GTest::gtest_main)
 msim_set_warnings(msim_tests)
