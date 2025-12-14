@@ -49,6 +49,7 @@ add_library(msim
   src/matching_engine.cpp
   src/simulator.cpp
   src/order_flow.cpp
+  src/rules.cpp
 )
 
 target_include_directories(msim PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
@@ -85,6 +86,7 @@ add_executable(msim_tests
   tests/test_matching.cpp
   tests/test_cancel_modify.cpp
   tests/test_simulator.cpp
+  tests/test_rules.cpp
 )
 
 target_link_libraries(msim_tests PRIVATE msim GTest::gtest_main)
