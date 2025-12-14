@@ -8,6 +8,7 @@ using Price    = int32_t;   // ticks
 using Qty      = int32_t;   // shares/contracts
 using OrderId  = uint64_t;
 using TradeId  = uint64_t;
+using OwnerId  = uint64_t;  // <--- ADD THIS
 using Ts       = int64_t;   // timestamp in nanoseconds (or any consistent unit)
 
 enum class Side : uint8_t { Buy = 0, Sell = 1 };
