@@ -328,12 +328,14 @@ MatchResult MatchingEngine::process(Order incoming) {
   // Closed: ignore everything
   if (rules_.phase() == MarketPhase::Closed) return out;
 
-  // Circuit breaker halt: queue orders for reopening (if configured), no matching
+  // Circuit breaker halt: either reject or queue (depending on config), no matching
   if (rules_.phase() == MarketPhase::Halted) {
-    if (rules_.config().queue_orders_during_halt) {
-      auto q = queue_in_auction(std::move(incoming));
-      (void)q;
+    if (!rules_.config().queue_orders_during_halt) {
+      out.status = OrderStatus::Rejected;
+      out.reject_reason = RejectReason::MarketHalted;
+      return out;
     }
+    (void)queue_in_auction(std::move(incoming));
     return out;
   }
 
