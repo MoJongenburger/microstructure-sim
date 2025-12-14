@@ -1,0 +1,16 @@
+# Build artifacts
+build/
+out/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+*.cmake
+Makefile
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
