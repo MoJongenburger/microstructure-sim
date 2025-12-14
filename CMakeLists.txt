@@ -48,11 +48,21 @@ add_library(msim
   src/book.cpp
   src/matching_engine.cpp
   src/simulator.cpp
+  src/order_flow.cpp
 )
 
 target_include_directories(msim PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 msim_set_warnings(msim)
 msim_enable_sanitizers(msim)
+
+# ---------------- CLI executable ----------------
+add_executable(msim_cli
+  src/main.cpp
+)
+
+target_link_libraries(msim_cli PRIVATE msim)
+msim_set_warnings(msim_cli)
+msim_enable_sanitizers(msim_cli)
 
 # ---------------- Testing ----------------
 include(CTest)
