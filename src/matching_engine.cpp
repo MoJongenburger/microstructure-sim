@@ -1,7 +1,8 @@
 #include "msim/matching_engine.hpp"
 #include <algorithm>
 #include <set>
-#include <cstdlib> // std::abs
+#include <cstdlib>   // std::abs
+#include <span>
 
 namespace msim {
 
@@ -19,12 +20,57 @@ void MatchingEngine::start_closing_auction(Ts end_ts) noexcept {
   rules_.set_phase(MarketPhase::ClosingAuction);
 }
 
+void MatchingEngine::maybe_trigger_circuit_breaker(std::span<const Trade> trades) {
+  const auto& cfg = rules_.config();
+  if (!cfg.enable_circuit_breaker) return;
+  if (trades.empty()) return;
+
+  // Only trigger from continuous trading (simple, deterministic)
+  if (rules_.phase() != MarketPhase::Continuous) return;
+
+  // Set CB reference on first observed trade
+  if (!cb_ref_price_) cb_ref_price_ = trades.front().price;
+
+  const Price ref = *cb_ref_price_;
+  const Price lower = mul_div_bps(ref, 10000 - cfg.cb_drop_bps, 10000);
+
+  const Trade& last = trades.back();
+  if (last.price > lower) return;
+
+  // Trigger halt
+  rules_.set_phase(MarketPhase::Halted);
+  halt_end_ts_ = last.ts + cfg.cb_halt_duration_ns;
+  reopen_auction_end_ts_ = halt_end_ts_ + cfg.cb_reopen_auction_duration_ns;
+
+  // Prepare reopen auction: move current book liquidity into auction queue
+  // (so the reopening auction includes the frozen book + new queued orders)
+  for (auto& [px, lvl] : book_.bids_) {
+    for (auto& o : lvl.q) auction_queue_.push_back(std::move(o));
+  }
+  for (auto& [px, lvl] : book_.asks_) {
+    for (auto& o : lvl.q) auction_queue_.push_back(std::move(o));
+  }
+
+  book_.bids_.clear();
+  book_.asks_.clear();
+  book_.loc_.clear();
+
+  // The reopening auction ends at reopen_auction_end_ts_
+  auction_end_ts_ = reopen_auction_end_ts_;
+}
+
 std::vector<Trade> MatchingEngine::flush(Ts ts) {
   std::vector<Trade> out;
 
   // TAL expiry -> back to Continuous (session controller decides next phase)
   if (rules_.phase() == MarketPhase::TradingAtLast && tal_end_ts_ > 0 && ts >= tal_end_ts_) {
     rules_.set_phase(MarketPhase::Continuous);
+  }
+
+  // Circuit breaker halt expiry -> transition to reopening Auction
+  if (rules_.phase() == MarketPhase::Halted && halt_end_ts_ > 0 && ts >= halt_end_ts_) {
+    rules_.set_phase(MarketPhase::Auction);
+    // auction_end_ts_ was already set on trigger; keep as-is
   }
 
   // Auction expiry -> uncross (Auction => Continuous, ClosingAuction => Closed)
@@ -40,6 +86,9 @@ std::vector<Trade> MatchingEngine::flush(Ts ts) {
     }
 
     rules_.on_trades(out);
+    // CB can trigger on auction prints too (optional). Keep deterministic:
+    // Only trigger from Continuous, so this won't re-trigger here.
+    maybe_trigger_circuit_breaker(out);
   }
 
   return out;
@@ -193,9 +242,17 @@ std::vector<Trade> MatchingEngine::uncross_auction(Ts uncross_ts) {
 
   const auto px_opt = compute_clearing_price();
   if (!px_opt) {
+    // If no clearing price, make all LIMIT orders resting; drop MARKET orders.
+    for (auto& o : auction_queue_) {
+      if (o.type == OrderType::Limit && o.qty > 0) {
+        o.ts = uncross_ts;
+        (void)book_.add_resting_limit(o);
+      }
+    }
     auction_queue_.clear();
     return trades;
   }
+
   const Price clearing_px = *px_opt;
 
   std::vector<Order> buys;
@@ -205,13 +262,11 @@ std::vector<Trade> MatchingEngine::uncross_auction(Ts uncross_ts) {
     Order copy = o;
     copy.ts = uncross_ts;
 
-    if (copy.type == OrderType::Market) {
-      if (copy.side == Side::Buy) buys.push_back(copy);
-      else sells.push_back(copy);
-    } else {
-      if (copy.side == Side::Buy && copy.price >= clearing_px) buys.push_back(copy);
-      if (copy.side == Side::Sell && copy.price <= clearing_px) sells.push_back(copy);
-    }
+    const bool eligible_buy  = (copy.side == Side::Buy)  && (copy.type == OrderType::Market || copy.price >= clearing_px);
+    const bool eligible_sell = (copy.side == Side::Sell) && (copy.type == OrderType::Market || copy.price <= clearing_px);
+
+    if (eligible_buy) buys.push_back(copy);
+    if (eligible_sell) sells.push_back(copy);
   }
 
   auto pri = [](const Order& a, const Order& b) {
@@ -234,6 +289,24 @@ std::vector<Trade> MatchingEngine::uncross_auction(Ts uncross_ts) {
     s.qty -= q;
   }
 
+  // Restock leftover eligible LIMIT orders into continuous book
+  for (auto& b : buys) {
+    if (b.qty > 0 && b.type == OrderType::Limit) (void)book_.add_resting_limit(b);
+  }
+  for (auto& s : sells) {
+    if (s.qty > 0 && s.type == OrderType::Limit) (void)book_.add_resting_limit(s);
+  }
+
+  // Restock ineligible LIMIT orders (queued during auction but not executable at clearing price)
+  for (auto& o : auction_queue_) {
+    if (o.type != OrderType::Limit || o.qty <= 0) continue;
+    const bool eligible = (o.side == Side::Buy) ? (o.price >= clearing_px) : (o.price <= clearing_px);
+    if (!eligible) {
+      o.ts = uncross_ts;
+      (void)book_.add_resting_limit(o);
+    }
+  }
+
   auction_queue_.clear();
   return trades;
 }
@@ -241,7 +314,7 @@ std::vector<Trade> MatchingEngine::uncross_auction(Ts uncross_ts) {
 MatchResult MatchingEngine::process(Order incoming) {
   MatchResult out{};
 
-  // Step 13: finalize any due phase endings BEFORE processing this message
+  // Finalize any due phase endings BEFORE processing this message
   auto flushed = flush(incoming.ts);
   out.trades.insert(out.trades.end(), flushed.begin(), flushed.end());
 
@@ -252,8 +325,17 @@ MatchResult MatchingEngine::process(Order incoming) {
     return out;
   }
 
-  // Closed: ignore everything (accepted but no action)
+  // Closed: ignore everything
   if (rules_.phase() == MarketPhase::Closed) return out;
+
+  // Circuit breaker halt: queue orders for reopening (if configured), no matching
+  if (rules_.phase() == MarketPhase::Halted) {
+    if (rules_.config().queue_orders_during_halt) {
+      auto q = queue_in_auction(std::move(incoming));
+      (void)q;
+    }
+    return out;
+  }
 
   // Trading-at-Last: only trade at last trade price
   if (rules_.phase() == MarketPhase::TradingAtLast) {
@@ -270,7 +352,6 @@ MatchResult MatchingEngine::process(Order incoming) {
       return out;
     }
 
-    // Market orders become limit at last
     incoming.type = OrderType::Limit;
     incoming.price = *last;
 
@@ -282,19 +363,23 @@ MatchResult MatchingEngine::process(Order incoming) {
     for (const auto& tr : out.trades) out.filled_qty += tr.qty;
 
     rules_.on_trades(out.trades);
+    // CB only triggers in Continuous, so harmless here
+    maybe_trigger_circuit_breaker(out.trades);
     return out;
   }
 
-  // Auction phases: if still in auction at this timestamp, queue (flush already handled any expiry)
+  // Auction phases: queue (flush handles expiry/uncross)
   if (rules_.phase() == MarketPhase::Auction || rules_.phase() == MarketPhase::ClosingAuction) {
-    return queue_in_auction(std::move(incoming));
+    (void)queue_in_auction(std::move(incoming));
+    return out;
   }
 
   // Volatility trigger only in continuous
   if (should_trigger_volatility_auction(incoming)) {
     rules_.set_phase(MarketPhase::Auction);
     auction_end_ts_ = incoming.ts + rules_.config().vol_auction_duration_ns;
-    return queue_in_auction(std::move(incoming));
+    (void)queue_in_auction(std::move(incoming));
+    return out;
   }
 
   // FOK pre-check
@@ -302,6 +387,7 @@ MatchResult MatchingEngine::process(Order incoming) {
     const Qty avail = available_liquidity(incoming);
     if (avail < incoming.qty) {
       rules_.on_trades(out.trades);
+      maybe_trigger_circuit_breaker(out.trades);
       return out;
     }
   }
@@ -317,6 +403,8 @@ MatchResult MatchingEngine::process(Order incoming) {
   for (const auto& tr : out.trades) out.filled_qty += tr.qty;
 
   rules_.on_trades(out.trades);
+  maybe_trigger_circuit_breaker(out.trades);
+
   return out;
 }
 
@@ -397,7 +485,7 @@ void MatchingEngine::match_buy(MatchResult& out, Order& taker) {
     maker.qty -= q;
     lvl.total_qty -= q;
 
-    if (maker.qty == 0) {   book_.erase_locator(maker.id);   lvl.q.pop_front(); }
+    if (maker.qty == 0) { book_.erase_locator(maker.id); lvl.q.pop_front(); }
     if (lvl.total_qty == 0) book_.asks_.erase(best_it);
   }
 }
@@ -437,7 +525,7 @@ void MatchingEngine::match_sell(MatchResult& out, Order& taker) {
     maker.qty -= q;
     lvl.total_qty -= q;
 
-    if (maker.qty == 0) {   book_.erase_locator(maker.id);   lvl.q.pop_front(); }
+    if (maker.qty == 0) { book_.erase_locator(maker.id); lvl.q.pop_front(); }
     if (lvl.total_qty == 0) book_.bids_.erase(best_it);
   }
 }
