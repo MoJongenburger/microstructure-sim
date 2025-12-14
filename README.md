@@ -1,4 +1,3 @@
-````md
 # microstructure-sim
 
 Event-driven **limit order book** + **matching engine** simulator in modern C++20.
