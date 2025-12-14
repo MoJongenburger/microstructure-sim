@@ -397,7 +397,7 @@ void MatchingEngine::match_buy(MatchResult& out, Order& taker) {
     maker.qty -= q;
     lvl.total_qty -= q;
 
-    if (maker.qty == 0) lvl.q.pop_front();
+    if (maker.qty == 0) {   book_.erase_locator(maker.id);   lvl.q.pop_front(); }
     if (lvl.total_qty == 0) book_.asks_.erase(best_it);
   }
 }
@@ -437,7 +437,7 @@ void MatchingEngine::match_sell(MatchResult& out, Order& taker) {
     maker.qty -= q;
     lvl.total_qty -= q;
 
-    if (maker.qty == 0) lvl.q.pop_front();
+    if (maker.qty == 0) {   book_.erase_locator(maker.id);   lvl.q.pop_front(); }
     if (lvl.total_qty == 0) book_.bids_.erase(best_it);
   }
 }
