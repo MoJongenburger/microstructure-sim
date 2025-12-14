@@ -90,6 +90,7 @@ add_executable(msim_tests
   tests/test_stp.cpp
   tests/test_auction_uncross.cpp
   tests/test_closing_tal.cpp
+  tests/test_session.cpp
 )
 
 target_link_libraries(msim_tests PRIVATE msim GTest::gtest_main)
