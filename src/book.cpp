@@ -83,3 +83,94 @@ std::vector<LevelSummary> OrderBook::depth(Side side, std::size_t levels) const 
 
 } // namespace msim
 
+namespace msim {
+
+bool OrderBook::cancel(OrderId id) {
+  if (cancel_in_bids_(id)) return true;
+  return cancel_in_asks_(id);
+}
+
+bool OrderBook::modify(OrderId id, Qty new_qty) {
+  if (new_qty <= 0) return false; // use cancel() explicitly
+  if (modify_in_bids_(id, new_qty)) return true;
+  return modify_in_asks_(id, new_qty);
+}
+
+bool OrderBook::cancel_in_bids_(OrderId id) {
+  for (auto it = bids_.begin(); it != bids_.end(); ) {
+    auto& lvl = it->second;
+    for (auto qit = lvl.q.begin(); qit != lvl.q.end(); ++qit) {
+      if (qit->id == id) {
+        lvl.total_qty -= qit->qty;
+        lvl.q.erase(qit);
+        if (lvl.total_qty == 0) {
+          it = bids_.erase(it);
+        } else {
+          ++it;
+        }
+        return true;
+      }
+    }
+    if (lvl.total_qty == 0) it = bids_.erase(it);
+    else ++it;
+  }
+  return false;
+}
+
+bool OrderBook::cancel_in_asks_(OrderId id) {
+  for (auto it = asks_.begin(); it != asks_.end(); ) {
+    auto& lvl = it->second;
+    for (auto qit = lvl.q.begin(); qit != lvl.q.end(); ++qit) {
+      if (qit->id == id) {
+        lvl.total_qty -= qit->qty;
+        lvl.q.erase(qit);
+        if (lvl.total_qty == 0) {
+          it = asks_.erase(it);
+        } else {
+          ++it;
+        }
+        return true;
+      }
+    }
+    if (lvl.total_qty == 0) it = asks_.erase(it);
+    else ++it;
+  }
+  return false;
+}
+
+bool OrderBook::modify_in_bids_(OrderId id, Qty new_qty) {
+  for (auto it = bids_.begin(); it != bids_.end(); ++it) {
+    auto& lvl = it->second;
+    for (auto& o : lvl.q) {
+      if (o.id == id) {
+        if (new_qty > o.qty) return false; // only reduce
+        const Qty delta = o.qty - new_qty;
+        o.qty = new_qty;
+        lvl.total_qty -= delta;
+        if (lvl.total_qty == 0) bids_.erase(it);
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+bool OrderBook::modify_in_asks_(OrderId id, Qty new_qty) {
+  for (auto it = asks_.begin(); it != asks_.end(); ++it) {
+    auto& lvl = it->second;
+    for (auto& o : lvl.q) {
+      if (o.id == id) {
+        if (new_qty > o.qty) return false; // only reduce
+        const Qty delta = o.qty - new_qty;
+        o.qty = new_qty;
+        lvl.total_qty -= delta;
+        if (lvl.total_qty == 0) asks_.erase(it);
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+} // namespace msim
+
