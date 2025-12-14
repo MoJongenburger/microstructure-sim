@@ -2,50 +2,48 @@
 
 namespace msim {
 
-static bool is_on_tick(Price price, Price tick) noexcept {
-  if (tick <= 0) return false;
-  // Prices are integers in ticks; enforce grid by modulo.
-  return (price % tick) == 0;
-}
-
-static bool is_on_lot(Qty qty, Qty lot) noexcept {
-  if (lot <= 0) return false;
-  return (qty % lot) == 0;
-}
-
 RuleDecision RuleSet::pre_accept(const Order& incoming) const {
-  // Basic validity
-  if (!is_valid_order(incoming)) {
-    return RuleDecision{false, RejectReason::InvalidOrder};
+  RuleDecision d{};
+
+  if (incoming.qty <= 0) {
+    d.accept = false;
+    d.reason = RejectReason::InvalidOrder;
+    return d;
   }
 
-  // Halt rule
-  if (cfg_.enforce_halt && phase_ == MarketPhase::Halted) {
-    return RuleDecision{false, RejectReason::MarketHalted};
+  // Halt behavior: either reject, or allow engine to queue during halt
+  if (phase_ == MarketPhase::Halted && cfg_.enforce_halt && !cfg_.queue_orders_during_halt) {
+    d.accept = false;
+    d.reason = RejectReason::MarketHalted;
+    return d;
   }
 
-  // Step 7: quantity rules
-  if (incoming.qty < cfg_.min_qty) {
-    return RuleDecision{false, RejectReason::QtyBelowMinimum};
-  }
-  if (!is_on_lot(incoming.qty, cfg_.lot_size)) {
-    return RuleDecision{false, RejectReason::QtyNotOnLot};
-  }
-
-  // Step 7: tick rule applies to limit orders
+  // Tick rule: only apply to LIMIT orders (market price ignored)
   if (incoming.type == OrderType::Limit) {
-    if (!is_on_tick(incoming.price, cfg_.tick_size_ticks)) {
-      return RuleDecision{false, RejectReason::PriceNotOnTick};
+    if (cfg_.tick_size_ticks > 0 && (incoming.price % cfg_.tick_size_ticks) != 0) {
+      d.accept = false;
+      d.reason = RejectReason::PriceNotOnTick;
+      return d;
     }
   }
 
-  return RuleDecision{true, RejectReason::None};
+  // Lot/min qty rules
+  if (cfg_.min_qty > 0 && incoming.qty < cfg_.min_qty) {
+    d.accept = false;
+    d.reason = RejectReason::QtyBelowMinimum;
+    return d;
+  }
+  if (cfg_.lot_size > 0 && (incoming.qty % cfg_.lot_size) != 0) {
+    d.accept = false;
+    d.reason = RejectReason::QtyNotOnLot;
+    return d;
+  }
+
+  return d;
 }
 
 void RuleSet::on_trades(std::span<const Trade> trades) {
-  for (const auto& t : trades) {
-    last_trade_price_ = t.price;
-  }
+  if (!trades.empty()) last_trade_price_ = trades.back().price;
 }
 
 } // namespace msim
