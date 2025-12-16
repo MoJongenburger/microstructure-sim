@@ -50,15 +50,12 @@ int main(int argc, char** argv) {
     const double horizon_s = std::stod(argv[3]);
     const msim::Ts horizon_ns = static_cast<msim::Ts>(horizon_s * 1'000'000'000.0);
 
-    // Basic rules for now (you can enable more in cfg later)
+    // Exchange rules (keep defaults unless you want to toggle features later)
     msim::RulesConfig cfg;
-    cfg.tick_size = 1;
-    cfg.lot_size = 1;
-    cfg.min_qty = 1;
-
     msim::MatchingEngine eng(msim::RuleSet(cfg));
     msim::World w(std::move(eng));
 
+    // Agent config is now self-contained (no RulesConfig dependency)
     msim::agents::NoiseTraderConfig nt{};
     nt.intensity_per_step = 0.30;
     nt.prob_market = 0.15;
@@ -66,10 +63,17 @@ int main(int argc, char** argv) {
     nt.min_qty = 1;
     nt.max_qty = 10;
 
+    // Order grid assumptions for generated orders
+    nt.tick_size = 1;
+    nt.lot_size = 1;
+
+    // If the book has no mid yet
+    nt.default_mid = 100;
+
     // Multiple independent agents
-    w.add_agent(std::make_unique<msim::agents::NoiseTrader>(1, nt, cfg));
-    w.add_agent(std::make_unique<msim::agents::NoiseTrader>(2, nt, cfg));
-    w.add_agent(std::make_unique<msim::agents::NoiseTrader>(3, nt, cfg));
+    w.add_agent(std::make_unique<msim::agents::NoiseTrader>(1, nt));
+    w.add_agent(std::make_unique<msim::agents::NoiseTrader>(2, nt));
+    w.add_agent(std::make_unique<msim::agents::NoiseTrader>(3, nt));
 
     const msim::Ts step_ns = 100'000; // 0.1ms deterministic timestep
 
