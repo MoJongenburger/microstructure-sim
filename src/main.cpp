@@ -52,22 +52,21 @@ int main(int argc, char** argv) {
 
     // Exchange rules (keep defaults unless you want to toggle features later)
     msim::RulesConfig cfg;
-    msim::MatchingEngine eng(msim::RuleSet(cfg));
+
+    // IMPORTANT: braces avoid "most vexing parse"
+    msim::MatchingEngine eng{ msim::RuleSet(cfg) };
+
     msim::World w(std::move(eng));
 
-    // Agent config is now self-contained (no RulesConfig dependency)
+    // Agent config is self-contained (no RulesConfig dependency)
     msim::agents::NoiseTraderConfig nt{};
     nt.intensity_per_step = 0.30;
     nt.prob_market = 0.15;
     nt.max_offset_ticks = 5;
     nt.min_qty = 1;
     nt.max_qty = 10;
-
-    // Order grid assumptions for generated orders
     nt.tick_size = 1;
     nt.lot_size = 1;
-
-    // If the book has no mid yet
     nt.default_mid = 100;
 
     // Multiple independent agents
