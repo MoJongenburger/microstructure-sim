@@ -3,7 +3,7 @@
 #include <vector>
 
 #include "msim/agents/agent.hpp"
-#include "msim/rules.hpp"
+#include "msim/types.hpp"
 
 namespace msim::agents {
 
@@ -20,12 +20,19 @@ struct NoiseTraderConfig {
   // Quantity distribution (uniform in [min_qty, max_qty])
   Qty min_qty{1};
   Qty max_qty{10};
+
+  // Grid assumptions for generated orders (exchange will enforce its own rules too)
+  Price tick_size{1};
+  Qty   lot_size{1};
+
+  // If book has no mid yet, use this
+  Price default_mid{100};
 };
 
 class NoiseTrader final : public Agent {
 public:
-  NoiseTrader(OwnerId owner, NoiseTraderConfig cfg, const msim::RulesConfig& rules_cfg)
-    : owner_(owner), cfg_(cfg), rules_cfg_(rules_cfg) {}
+  NoiseTrader(OwnerId owner, NoiseTraderConfig cfg)
+    : owner_(owner), cfg_(cfg) {}
 
   OwnerId owner_id() const noexcept override { return owner_; }
 
@@ -34,8 +41,6 @@ public:
 private:
   OwnerId owner_{0};
   NoiseTraderConfig cfg_{};
-  msim::RulesConfig rules_cfg_{};
-
   OrderId next_order_id_{1};
 
   Price snap_to_tick(Price p) const noexcept;
