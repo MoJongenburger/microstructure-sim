@@ -230,13 +230,17 @@ static std::string reject_to_str(msim::RejectReason r) {
     case RR::None: return "None";
     case RR::InvalidOrder: return "InvalidOrder";
     case RR::MarketHalted: return "MarketHalted";
-    case RR::TickViolation: return "TickViolation";
-    case RR::LotViolation: return "LotViolation";
-    case RR::MinQtyViolation: return "MinQtyViolation";
+
+    // NOTE:
+    // Your current RejectReason enum does NOT contain TickViolation/LotViolation/MinQtyViolation,
+    // so we intentionally do not reference them here (keeps CI green across platforms).
+    // Any other reject codes will fall back to "Other(<int>)".
+
     case RR::NoReferencePrice: return "NoReferencePrice";
     case RR::PriceNotAtLast: return "PriceNotAtLast";
-    default: return "Other";
+    default: break;
   }
+  return "Other(" + std::to_string(static_cast<int>(r)) + ")";
 }
 
 static msim::Side parse_side(const std::string& s) {
