@@ -10,6 +10,9 @@ project(microstructure_sim
 option(MSIM_ENABLE_WERROR "Treat warnings as errors" OFF)
 option(MSIM_ENABLE_SANITIZERS "Enable ASan/UBSan (Clang/GCC)" OFF)
 
+# Step 18 (Option B): HTTP gateway + simple web UI
+option(MSIM_BUILD_GATEWAY "Build HTTP gateway + web UI" ON)
+
 # ---------------- Language setup ----------------
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -55,7 +58,7 @@ add_library(msim
   src/world.cpp
   src/agents/noise_trader.cpp
 
-  # Step 17 (Ledger + market maker agent)
+  # Step 17 (Market maker agent)
   src/agents/market_maker.cpp
 )
 
@@ -72,11 +75,42 @@ target_link_libraries(msim_cli PRIVATE msim)
 msim_set_warnings(msim_cli)
 msim_enable_sanitizers(msim_cli)
 
+# ---------------- Dependencies (FetchContent) ----------------
+include(FetchContent)
+
+# ---------------- Step 18: Gateway deps + executable ----------------
+if (MSIM_BUILD_GATEWAY)
+  # cpp-httplib (header-only HTTP server)
+  FetchContent_Declare(
+    httplib
+    URL https://github.com/yhirose/cpp-httplib/archive/refs/tags/v0.16.3.zip
+  )
+
+  # nlohmann/json
+  FetchContent_Declare(
+    nlohmann_json
+    URL https://github.com/nlohmann/json/archive/refs/tags/v3.11.3.zip
+  )
+
+  FetchContent_MakeAvailable(httplib nlohmann_json)
+
+  add_executable(msim_gateway
+    src/gateway_main.cpp
+  )
+
+  target_link_libraries(msim_gateway PRIVATE
+    msim
+    httplib::httplib
+    nlohmann_json::nlohmann_json
+  )
+
+  msim_set_warnings(msim_gateway)
+  msim_enable_sanitizers(msim_gateway)
+endif()
+
 # ---------------- Testing ----------------
 include(CTest)
 enable_testing()
-
-include(FetchContent)
 
 # Recommended for MSVC CRT compatibility
 set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
