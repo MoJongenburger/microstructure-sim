@@ -1,19 +1,19 @@
 #include <algorithm>
-#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <optional>
 #include <random>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <type_traits>
 #include <utility>
 #include <vector>
-#include <thread>
 
 #include "httplib.h"
 
@@ -23,14 +23,37 @@
 #include "msim/rules.hpp"
 #include "msim/types.hpp"
 
-// ---------------- Small helpers ----------------
+// ---------------- Tunables (static storage => no lambda capture issues) ----------------
+namespace {
+
+constexpr std::size_t kMMLevels = 5;
+
+// Keep top-of-book deep so aggressor market orders usually produce ~1 trade per order
+constexpr msim::Qty kMMQtyL1   = 50'000;
+constexpr msim::Qty kMMQtyStep = 10'000;
+
+// How often the MM re-quotes the whole ladder
+constexpr int kMMRefreshMs = 250;
+
+// Aggressor threads (market orders) => drives trade rate
+constexpr int kAggressorThreads = 2;
+constexpr int kAggressorSleepMs = 2;   // 2ms => ~500 orders/sec/thread => ~1000 orders/sec total
+
+constexpr msim::Qty kAggrMinQ = 1;
+constexpr msim::Qty kAggrMaxQ = 25;
+
+// Fundamental drift => makes price change every ~3–6 seconds
+constexpr int kFundMinMs = 3000;
+constexpr int kFundMaxMs = 6000;
+constexpr int kFundStepTicks = 1;
+
+} // namespace
+
+// ---------------- Helpers ----------------
 static long long get_ll(const httplib::Request& req, const char* key, long long def = 0) {
   if (!req.has_param(key)) return def;
-  try {
-    return std::stoll(req.get_param_value(key));
-  } catch (...) {
-    return def;
-  }
+  try { return std::stoll(req.get_param_value(key)); }
+  catch (...) { return def; }
 }
 
 static std::string json_bool(bool v) { return v ? "true" : "false"; }
@@ -43,73 +66,53 @@ static std::string read_text_file(const std::string& path) {
   return ss.str();
 }
 
-// ---------------- Compile-time detection helpers ----------------
+static void set_no_cache(httplib::Response& res) {
+  res.set_header("Cache-Control", "no-store, max-age=0");
+  res.set_header("Pragma", "no-cache");
+}
+
+// ---------------- Compile-time detection for your OrderAck + LiveWorld API ----------------
 template <class T>
 static bool ack_accepted_(const T& a) {
-  if constexpr (requires { a.accepted; }) {
-    return static_cast<bool>(a.accepted);
-  } else if constexpr (requires { a.ok; }) {
-    return static_cast<bool>(a.ok);
-  } else if constexpr (requires { a.status; }) {
-    return static_cast<int>(a.status) == 0;
-  } else {
-    return true;
-  }
+  if constexpr (requires { a.accepted; }) return static_cast<bool>(a.accepted);
+  else if constexpr (requires { a.ok; }) return static_cast<bool>(a.ok);
+  else if constexpr (requires { a.status; }) return static_cast<int>(a.status) == 0;
+  else return true;
 }
 
 template <class T>
 static int ack_reason_(const T& a) {
-  if constexpr (requires { a.reject_reason; }) {
-    return static_cast<int>(a.reject_reason);
-  } else if constexpr (requires { a.reason; }) {
-    return static_cast<int>(a.reason);
-  } else if constexpr (requires { a.reject; }) {
-    return static_cast<int>(a.reject);
-  } else {
-    return 0;
-  }
+  if constexpr (requires { a.reject_reason; }) return static_cast<int>(a.reject_reason);
+  else if constexpr (requires { a.reason; }) return static_cast<int>(a.reason);
+  else if constexpr (requires { a.reject; }) return static_cast<int>(a.reject);
+  else return 0;
 }
 
 template <class T>
 static long long ack_order_id_(const T& a) {
-  if constexpr (requires { a.order_id; }) {
-    return static_cast<long long>(a.order_id);
-  } else if constexpr (requires { a.id; }) {
-    return static_cast<long long>(a.id);
-  } else if constexpr (requires { a.oid; }) {
-    return static_cast<long long>(a.oid);
-  } else {
-    return 0;
-  }
+  if constexpr (requires { a.order_id; }) return static_cast<long long>(a.order_id);
+  else if constexpr (requires { a.id; }) return static_cast<long long>(a.id);
+  else if constexpr (requires { a.oid; }) return static_cast<long long>(a.oid);
+  else return 0;
 }
 
 template <class LiveW>
 static bool live_cancel_(LiveW& w, msim::OrderId id) {
-  if constexpr (requires { w.cancel(id); }) {
-    return w.cancel(id);
-  } else if constexpr (requires { w.cancel_order(id); }) {
-    return w.cancel_order(id);
-  } else if constexpr (requires { w.cancel_order_id(id); }) {
-    return w.cancel_order_id(id);
-  } else {
-    return false;
-  }
+  if constexpr (requires { w.cancel(id); }) return w.cancel(id);
+  else if constexpr (requires { w.cancel_order(id); }) return w.cancel_order(id);
+  else if constexpr (requires { w.cancel_order_id(id); }) return w.cancel_order_id(id);
+  else return false;
 }
 
 template <class LiveW>
 static bool live_modify_(LiveW& w, msim::OrderId id, msim::Qty q) {
-  if constexpr (requires { w.modify_qty(id, q); }) {
-    return w.modify_qty(id, q);
-  } else if constexpr (requires { w.modify(id, q); }) {
-    return w.modify(id, q);
-  } else if constexpr (requires { w.modify_order_qty(id, q); }) {
-    return w.modify_order_qty(id, q);
-  } else {
-    return false;
-  }
+  if constexpr (requires { w.modify_qty(id, q); }) return w.modify_qty(id, q);
+  else if constexpr (requires { w.modify(id, q); }) return w.modify(id, q);
+  else if constexpr (requires { w.modify_order_qty(id, q); }) return w.modify_order_qty(id, q);
+  else return false;
 }
 
-// Depth level accessors (supports several layouts)
+// Depth level accessors (supports multiple layouts)
 template <class L>
 static long long level_price_(const L& x) {
   if constexpr (requires { x.price; }) return static_cast<long long>(x.price);
@@ -132,11 +135,6 @@ static long long level_orders_(const L& x) {
   else return 0;
 }
 
-static void set_no_cache(httplib::Response& res) {
-  res.set_header("Cache-Control", "no-store, max-age=0");
-  res.set_header("Pragma", "no-cache");
-}
-
 // ---------------- Synthetic flow (MM ladder + aggressors) ----------------
 static msim::OrderId make_oid_(msim::OwnerId owner, std::uint32_t seq) noexcept {
   const std::uint64_t hi = (static_cast<std::uint64_t>(owner) & 0xFFFF'FFFFull) << 32;
@@ -145,102 +143,94 @@ static msim::OrderId make_oid_(msim::OwnerId owner, std::uint32_t seq) noexcept 
 }
 
 struct FlowThreads {
-  std::atomic<bool> running{true};
-  std::thread fundamental_thread{};
-  std::thread mm_thread{};
-  std::vector<std::thread> aggressors{};
+  std::shared_ptr<std::atomic<bool>> running;
+  std::thread fundamental_thread;
+  std::thread mm_thread;
+  std::vector<std::thread> aggressors;
 };
 
 static FlowThreads start_background_flow(msim::LiveWorld& world,
                                         const msim::RulesConfig& rcfg,
                                         std::uint64_t seed) {
   FlowThreads ft{};
-
-  // ---- Tunables (safe defaults) ----
-  constexpr std::size_t MM_LEVELS = 5;           // L2 ladder depth to maintain
-  constexpr msim::Qty   MM_QTY_L1 = 50'000;      // big top level so each market order is usually 1 trade
-  constexpr msim::Qty   MM_QTY_STEP = 10'000;    // decrement per deeper level
-  constexpr int         MM_REFRESH_MS = 250;     // how often to re-quote ladder
-
-  constexpr int AGGRESSOR_THREADS = 2;
-  constexpr int AGGRESSOR_SLEEP_MS = 2;          // 2ms => ~500 orders/sec per thread (~1000 total)
-  constexpr msim::Qty AGGR_MIN_Q = 1;
-  constexpr msim::Qty AGGR_MAX_Q = 25;
-
-  // "Price moves every 3–6 seconds" via a small fundamental random walk
-  constexpr int FUND_MIN_MS = 3000;
-  constexpr int FUND_MAX_MS = 6000;
-  constexpr int FUND_STEP_TICKS = 1;             // +/- 1 tick per update
+  ft.running = std::make_shared<std::atomic<bool>>(true);
+  auto run = ft.running;
 
   const msim::Price tick = std::max<msim::Price>(1, static_cast<msim::Price>(rcfg.tick_size_ticks));
-  std::atomic<long long> fundamental_px{100}; // in "Price units" (already ticks in this simulator)
+  auto fundamental_px = std::make_shared<std::atomic<long long>>(100LL);
 
-  // ---- Fundamental updater ----
-  ft.fundamental_thread = std::thread([&ft, &fundamental_px, seed, tick]() {
-    std::mt19937_64 rng(seed ^ 0xA5A5A5A5A5A5A5A5ull);
-    std::uniform_int_distribution<int> sleep_ms(FUND_MIN_MS, FUND_MAX_MS);
+  // ---- Fundamental updater (drift every ~3–6s) ----
+  ft.fundamental_thread = std::thread([run, fundamental_px, seed, tick]() {
+    std::mt19937_64 rng(static_cast<std::mt19937_64::result_type>(seed) ^
+                        static_cast<std::mt19937_64::result_type>(0xA5A5A5A5A5A5A5A5ull));
+    std::uniform_int_distribution<int> sleep_ms(kFundMinMs, kFundMaxMs);
     std::uniform_int_distribution<int> dir(-1, 1);
 
-    while (ft.running.load(std::memory_order_relaxed)) {
+    while (run->load(std::memory_order_relaxed)) {
       std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms(rng)));
       const int d = dir(rng);
-      long long px = fundamental_px.load(std::memory_order_relaxed);
-      px += static_cast<long long>(d) * static_cast<long long>(FUND_STEP_TICKS) * static_cast<long long>(tick);
+
+      long long px = fundamental_px->load(std::memory_order_relaxed);
+      px += static_cast<long long>(d) * static_cast<long long>(kFundStepTicks) * static_cast<long long>(tick);
       if (px < static_cast<long long>(tick)) px = static_cast<long long>(tick);
-      fundamental_px.store(px, std::memory_order_relaxed);
+
+      fundamental_px->store(px, std::memory_order_relaxed);
     }
   });
 
   // ---- Market maker ladder ----
-  ft.mm_thread = std::thread([&ft, &world, &fundamental_px, seed, tick]() {
+  ft.mm_thread = std::thread([run, &world, fundamental_px, seed, tick]() {
     constexpr msim::OwnerId MM_OWNER = static_cast<msim::OwnerId>(2);
     std::uint32_t seq = 1;
 
-    std::array<msim::OrderId, MM_LEVELS> bid_ids{};
-    std::array<msim::OrderId, MM_LEVELS> ask_ids{};
+    std::array<msim::OrderId, kMMLevels> bid_ids{};
+    std::array<msim::OrderId, kMMLevels> ask_ids{};
     bid_ids.fill(static_cast<msim::OrderId>(0));
     ask_ids.fill(static_cast<msim::OrderId>(0));
 
-    // small RNG for tiny random “jitter” so it’s not totally mechanical
-    std::mt19937_64 rng(seed ^ 0xC0FFEEull);
+    std::mt19937_64 rng(static_cast<std::mt19937_64::result_type>(seed) ^
+                        static_cast<std::mt19937_64::result_type>(0xC0FFEEull));
     std::uniform_int_distribution<int> jitter(-1, 1);
 
-    while (ft.running.load(std::memory_order_relaxed)) {
-      // cancel previous ladder (ignore failures: might be filled)
-      for (std::size_t i = 0; i < MM_LEVELS; ++i) {
+    while (run->load(std::memory_order_relaxed)) {
+      // cancel old quotes (ignore failures: may be filled already)
+      for (std::size_t i = 0; i < kMMLevels; ++i) {
         if (bid_ids[i] != 0) (void)live_cancel_(world, bid_ids[i]);
         if (ask_ids[i] != 0) (void)live_cancel_(world, ask_ids[i]);
         bid_ids[i] = 0;
         ask_ids[i] = 0;
       }
 
-      const long long fpx_ll = fundamental_px.load(std::memory_order_relaxed);
-      const msim::Price fpx = static_cast<msim::Price>(std::max<long long>(static_cast<long long>(tick), fpx_ll));
+      const long long fpx_ll = fundamental_px->load(std::memory_order_relaxed);
+      const msim::Price fpx =
+          static_cast<msim::Price>(std::max<long long>(static_cast<long long>(tick), fpx_ll));
 
-      // Build a symmetric ladder around fundamental: bids below, asks above
-      for (std::size_t lvl = 0; lvl < MM_LEVELS; ++lvl) {
-        const msim::Price off = static_cast<msim::Price>((static_cast<long long>(lvl) + 1LL) * static_cast<long long>(tick));
-        const msim::Price j   = static_cast<msim::Price>(jitter(rng) * static_cast<int>(tick));
+      for (std::size_t lvl = 0; lvl < kMMLevels; ++lvl) {
+        const msim::Price off =
+            static_cast<msim::Price>((static_cast<long long>(lvl) + 1LL) * static_cast<long long>(tick));
+        const msim::Price j =
+            static_cast<msim::Price>(jitter(rng) * static_cast<int>(tick));
 
         msim::Qty qty = static_cast<msim::Qty>(
-          std::max<long long>(
-            1LL,
-            static_cast<long long>(MM_QTY_L1) - static_cast<long long>(MM_QTY_STEP) * static_cast<long long>(lvl)
-          )
-        );
+            std::max<long long>(
+                1LL,
+                static_cast<long long>(kMMQtyL1) -
+                    static_cast<long long>(kMMQtyStep) * static_cast<long long>(lvl)));
 
         // Bid
         {
           msim::Order b{};
           b.owner = MM_OWNER;
-          b.id    = make_oid_(MM_OWNER, seq++);
-          b.side  = msim::Side::Buy;
-          b.type  = msim::OrderType::Limit;
+          b.id = make_oid_(MM_OWNER, seq++);
+          b.side = msim::Side::Buy;
+          b.type = msim::OrderType::Limit;
+
           msim::Price px = static_cast<msim::Price>(fpx - off + j);
           if (px < tick) px = tick;
           b.price = px;
-          b.qty   = qty;
-          b.tif   = msim::TimeInForce::GTC;
+
+          b.qty = qty;
+          b.tif = msim::TimeInForce::GTC;
 
           (void)world.submit_order(b);
           bid_ids[lvl] = b.id;
@@ -250,59 +240,64 @@ static FlowThreads start_background_flow(msim::LiveWorld& world,
         {
           msim::Order a{};
           a.owner = MM_OWNER;
-          a.id    = make_oid_(MM_OWNER, seq++);
-          a.side  = msim::Side::Sell;
-          a.type  = msim::OrderType::Limit;
+          a.id = make_oid_(MM_OWNER, seq++);
+          a.side = msim::Side::Sell;
+          a.type = msim::OrderType::Limit;
+
           msim::Price px = static_cast<msim::Price>(fpx + off + j);
           if (px < tick) px = static_cast<msim::Price>(tick + off);
           a.price = px;
-          a.qty   = qty;
-          a.tif   = msim::TimeInForce::GTC;
+
+          a.qty = qty;
+          a.tif = msim::TimeInForce::GTC;
 
           (void)world.submit_order(a);
           ask_ids[lvl] = a.id;
         }
       }
 
-      std::this_thread::sleep_for(std::chrono::milliseconds(MM_REFRESH_MS));
+      std::this_thread::sleep_for(std::chrono::milliseconds(kMMRefreshMs));
     }
 
     // best-effort cleanup
-    for (std::size_t i = 0; i < MM_LEVELS; ++i) {
+    for (std::size_t i = 0; i < kMMLevels; ++i) {
       if (bid_ids[i] != 0) (void)live_cancel_(world, bid_ids[i]);
       if (ask_ids[i] != 0) (void)live_cancel_(world, ask_ids[i]);
     }
   });
 
-  // ---- Aggressors (market orders that hit the ladder) ----
-  ft.aggressors.reserve(static_cast<std::size_t>(AGGRESSOR_THREADS));
-  for (int k = 0; k < AGGRESSOR_THREADS; ++k) {
-    ft.aggressors.emplace_back([&ft, &world, seed, k]() {
+  // ---- Aggressors (market orders => trades/sec) ----
+  ft.aggressors.reserve(static_cast<std::size_t>(kAggressorThreads));
+  for (int k = 0; k < kAggressorThreads; ++k) {
+    ft.aggressors.emplace_back([run, &world, seed, k]() {
       const msim::OwnerId OWNER = static_cast<msim::OwnerId>(100 + k);
       std::uint32_t seq = 1;
 
-      std::mt19937_64 rng(seed ^ (0x1234ABCDull + static_cast<std::uint64_t>(k)));
-      std::uniform_int_distribution<int> side01(0, 1);
-      std::uniform_int_distribution<int> qdist(static_cast<int>(AGGR_MIN_Q), static_cast<int>(AGGR_MAX_Q));
+      using RT = std::mt19937_64::result_type;
+      const RT s = static_cast<RT>(seed) ^ (static_cast<RT>(0x1234ABCDull) + static_cast<RT>(k));
+      std::mt19937_64 rng(s);
 
-      while (ft.running.load(std::memory_order_relaxed)) {
+      std::uniform_int_distribution<int> side01(0, 1);
+      std::uniform_int_distribution<int> qdist(static_cast<int>(kAggrMinQ), static_cast<int>(kAggrMaxQ));
+
+      while (run->load(std::memory_order_relaxed)) {
         msim::Order o{};
         o.owner = OWNER;
-        o.id    = make_oid_(OWNER, seq++);
-        o.side  = (side01(rng) == 0) ? msim::Side::Buy : msim::Side::Sell;
-        o.type  = msim::OrderType::Market;
-        o.tif   = msim::TimeInForce::IOC;
-        o.price = 0;
-        o.qty   = static_cast<msim::Qty>(qdist(rng));
+        o.id = make_oid_(OWNER, seq++);
+        o.side = (side01(rng) == 0) ? msim::Side::Buy : msim::Side::Sell;
 
-        // If your Order struct has market-style, set it (present in your project)
+        o.type = msim::OrderType::Market;
+        o.tif = msim::TimeInForce::IOC;
+        o.price = 0;
+        o.qty = static_cast<msim::Qty>(qdist(rng));
+
         if constexpr (requires(msim::Order x) { x.mkt_style = msim::MarketStyle::PureMarket; }) {
           o.mkt_style = msim::MarketStyle::PureMarket;
         }
 
         (void)world.submit_order(o);
 
-        std::this_thread::sleep_for(std::chrono::milliseconds(AGGRESSOR_SLEEP_MS));
+        std::this_thread::sleep_for(std::chrono::milliseconds(kAggressorSleepMs));
       }
     });
   }
@@ -311,22 +306,25 @@ static FlowThreads start_background_flow(msim::LiveWorld& world,
 }
 
 static void stop_background_flow(FlowThreads& ft) {
-  ft.running.store(false, std::memory_order_relaxed);
+  if (ft.running) ft.running->store(false, std::memory_order_relaxed);
+
   if (ft.fundamental_thread.joinable()) ft.fundamental_thread.join();
   if (ft.mm_thread.joinable()) ft.mm_thread.join();
+
   for (auto& t : ft.aggressors) {
     if (t.joinable()) t.join();
   }
+  ft.aggressors.clear();
 }
 
 // ---------------- main ----------------
 int main(int argc, char** argv) {
   // args: [port] [seed]
   int port = 8080;
-  uint64_t seed = 1;
+  std::uint64_t seed = 1;
 
   if (argc > 1) port = std::atoi(argv[1]);
-  if (argc > 2) seed = static_cast<uint64_t>(std::strtoull(argv[2], nullptr, 10));
+  if (argc > 2) seed = static_cast<std::uint64_t>(std::strtoull(argv[2], nullptr, 10));
 
   // long horizon to behave "live"
   const double horizon_seconds = 3600.0 * 24.0 * 365.0;
@@ -336,12 +334,12 @@ int main(int argc, char** argv) {
   msim::LiveWorld world{std::move(eng)};
   world.start(seed, horizon_seconds);
 
-  // Start background flow (MM ladder + aggressors)
+  // Start background flow
   FlowThreads flow = start_background_flow(world, rcfg, seed);
 
   httplib::Server svr;
 
-  // Optional: allow typing "exit" to shutdown cleanly
+  // Allow typing "exit" or "quit" to stop cleanly
   std::thread stdin_thread([&]() {
     std::string line;
     while (std::getline(std::cin, line)) {
@@ -422,8 +420,7 @@ int main(int argc, char** argv) {
       try {
         const auto v = std::stoull(req.get_param_value("levels"));
         if (v > 0 && v <= 200) levels = static_cast<std::size_t>(v);
-      } catch (...) {
-      }
+      } catch (...) {}
     }
 
     auto d = world.book_depth(levels);
@@ -431,15 +428,9 @@ int main(int argc, char** argv) {
     long long max_cum = 1;
     {
       long long acc = 0;
-      for (const auto& x : d.asks) {
-        acc += level_qty_(x);
-        max_cum = std::max(max_cum, acc);
-      }
+      for (const auto& x : d.asks) { acc += level_qty_(x); max_cum = std::max(max_cum, acc); }
       acc = 0;
-      for (const auto& x : d.bids) {
-        acc += level_qty_(x);
-        max_cum = std::max(max_cum, acc);
-      }
+      for (const auto& x : d.bids) { acc += level_qty_(x); max_cum = std::max(max_cum, acc); }
     }
 
     std::ostringstream oss;
@@ -500,21 +491,16 @@ int main(int argc, char** argv) {
       if constexpr (requires(msim::Order x) { x.mkt_style = msim::MarketStyle::PureMarket; }) {
         o.mkt_style = msim::MarketStyle::PureMarket;
       }
-      // Market orders should generally be IOC in exchange-style sims
       if (o.tif == msim::TimeInForce::GTC) o.tif = msim::TimeInForce::IOC;
     }
 
     const auto ack = world.submit_order(o);
 
-    const bool accepted = ack_accepted_(ack);
-    const int reason = ack_reason_(ack);
-    const long long oid = ack_order_id_(ack);
-
     std::ostringstream oss;
     oss << "{";
-    oss << "\"accepted\":" << json_bool(accepted) << ",";
-    oss << "\"reason\":" << reason << ",";
-    oss << "\"order_id\":" << oid;
+    oss << "\"accepted\":" << json_bool(ack_accepted_(ack)) << ",";
+    oss << "\"reason\":" << ack_reason_(ack) << ",";
+    oss << "\"order_id\":" << ack_order_id_(ack);
     oss << "}";
     set_no_cache(res);
     res.set_content(oss.str(), "application/json");
@@ -545,11 +531,9 @@ int main(int argc, char** argv) {
 
   // Clean shutdown
   stop_background_flow(flow);
-
   if constexpr (requires { world.stop(); }) {
     world.stop();
   }
-
   if (stdin_thread.joinable()) stdin_thread.join();
   return 0;
 }
