@@ -11,16 +11,20 @@
 
 #include "httplib.h"
 
-#include "msim/matching_engine.hpp"
-#include "msim/rules.hpp"
 #include "msim/live_world.hpp"
+#include "msim/matching_engine.hpp"
 #include "msim/order.hpp"
+#include "msim/rules.hpp"
 #include "msim/types.hpp"
 
 // ---------------- Small helpers ----------------
 static long long get_ll(const httplib::Request& req, const char* key, long long def = 0) {
   if (!req.has_param(key)) return def;
-  try { return std::stoll(req.get_param_value(key)); } catch (...) { return def; }
+  try {
+    return std::stoll(req.get_param_value(key));
+  } catch (...) {
+    return def;
+  }
 }
 
 static std::string json_bool(bool v) { return v ? "true" : "false"; }
@@ -33,7 +37,6 @@ static bool ack_accepted_(const T& a) {
   } else if constexpr (requires { a.ok; }) {
     return static_cast<bool>(a.ok);
   } else if constexpr (requires { a.status; }) {
-    // Most codebases: Accepted==0
     return static_cast<int>(a.status) == 0;
   } else {
     return true;
@@ -118,7 +121,7 @@ static long long level_orders_(const L& x) {
 // ---------------- HTML (split to avoid MSVC C2026) ----------------
 static std::string html_page() {
   std::string s;
-  s.reserve(90'000);
+  s.reserve(120'000);
 
   s += R"HTML(
 <!doctype html>
@@ -136,14 +139,29 @@ static std::string html_page() {
       --text:#e5e7eb;
       --muted:#94a3b8;
       --muted2:#cbd5e1;
+
       --up:#22c55e;
       --down:#ef4444;
-      --wick:#94a3b8;
+      --bidText:#86efac;
+      --askText:#fca5a5;
+
       --grid:#1f2a37;
+      --row:#0a0e13;
+
+      --bestGlow: rgba(59,130,246,0.25);
+      --spreadGlow: rgba(148,163,184,0.12);
     }
-    body { margin:0; padding:0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial; background:var(--bg); color:var(--text); }
+    body {
+      margin:0; padding:0;
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial;
+      background:var(--bg); color:var(--text);
+    }
     .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
-    .topline { padding: 10px 14px; border-bottom: 1px solid var(--border); background:var(--bg); position: sticky; top: 0; z-index: 5; }
+    .topline {
+      padding: 10px 14px; border-bottom: 1px solid var(--border);
+      background:linear-gradient(180deg, rgba(255,255,255,0.02), rgba(0,0,0,0));
+      position: sticky; top: 0; z-index: 5;
+    }
 
     .wrap { padding: 14px; display: grid; grid-template-columns: 360px 1fr; gap: 14px; }
 
@@ -152,10 +170,16 @@ static std::string html_page() {
       border:1px solid var(--border);
       border-radius:12px;
       padding:14px;
-      box-shadow: 0 8px 24px rgba(0,0,0,.25);
+      box-shadow: 0 10px 28px rgba(0,0,0,.28);
     }
 
-    h2 { margin: 0 0 10px 0; font-size: 13px; letter-spacing: .02em; color: var(--muted2); text-transform: uppercase; }
+    h2 {
+      margin: 0 0 10px 0;
+      font-size: 12px;
+      letter-spacing: .08em;
+      color: var(--muted2);
+      text-transform: uppercase;
+    }
     .row { display:flex; gap:8px; align-items:center; margin: 6px 0; }
     label { width: 90px; font-size: 12px; color:var(--muted); }
 
@@ -173,15 +197,25 @@ static std::string html_page() {
     button:hover { filter: brightness(1.12); }
 
     .rightCol { display:grid; grid-template-rows: auto auto auto; gap: 14px; }
-    canvas { width: 100%; height: 260px; background:var(--bg); border:1px solid var(--border); border-radius:10px; }
+    canvas {
+      width: 100%; height: 260px;
+      background:var(--bg);
+      border:1px solid var(--border);
+      border-radius:10px;
+    }
 
     table { width:100%; border-collapse:collapse; font-size:12px; }
     th, td { padding:6px 8px; border-bottom:1px solid var(--border); text-align: left; }
     th { color:var(--muted); font-weight: 600; }
 
-    .controls { display:flex; gap:10px; align-items:center; margin: 8px 0 10px 0; color:var(--muted); font-size: 12px; flex-wrap: wrap; }
+    .controls {
+      display:flex; gap:10px; align-items:center;
+      margin: 8px 0 10px 0;
+      color:var(--muted); font-size: 12px;
+      flex-wrap: wrap;
+    }
 
-    /* Ladder styling */
+    /* Ladder: B3 version (mid/spread centered, cum depth, best highlights) */
     .ladder {
       width:100%;
       border:1px solid var(--border);
@@ -191,37 +225,54 @@ static std::string html_page() {
     }
     .ladderHead, .ladderRow {
       display:grid;
-      grid-template-columns: 1fr 90px 90px 1fr; /* bidQty, bidPx, askPx, askQty */
-      gap: 0;
-      align-items: center;
+      grid-template-columns: 86px 86px 76px 76px 86px 86px; /* bidCum, bidQty, bidPx, askPx, askQty, askCum */
+      align-items:center;
     }
     .ladderHead {
       background: #0a0e13;
       border-bottom: 1px solid var(--border);
       color: var(--muted);
       font-size: 11px;
-      padding: 6px 8px;
+      padding: 7px 8px;
       text-transform: uppercase;
-      letter-spacing: .04em;
+      letter-spacing: .06em;
     }
     .ladderRow {
       padding: 4px 8px;
-      border-bottom: 1px solid rgba(31,42,55,0.7);
+      border-bottom: 1px solid rgba(31,42,55,0.65);
       font-size: 12px;
     }
     .ladderRow:last-child { border-bottom: none; }
+
     .cell { position: relative; height: 18px; display:flex; align-items:center; }
     .cell.right { justify-content: flex-end; }
+
     .bar {
-      position:absolute; top:2px; bottom:2px; border-radius:6px;
+      position:absolute; top:2px; bottom:2px;
+      border-radius:6px;
       opacity: 0.22;
+      pointer-events:none;
     }
     .bar.bid { right:0; background: var(--up); }
     .bar.ask { left:0; background: var(--down); }
-    .pxBid { color: #86efac; } /* green-ish */
-    .pxAsk { color: #fca5a5; } /* red-ish */
-    .muted { color: var(--muted); }
 
+    .pxBid { color: var(--bidText); }
+    .pxAsk { color: var(--askText); }
+
+    .muted { color: var(--muted); }
+    .bestRow {
+      background: linear-gradient(90deg, transparent, var(--bestGlow), transparent);
+    }
+    .spreadRow {
+      background: linear-gradient(90deg, transparent, var(--spreadGlow), transparent);
+      border-top: 1px solid rgba(148,163,184,0.25);
+      border-bottom: 1px solid rgba(148,163,184,0.25);
+    }
+    .centerNote {
+      font-size: 11px;
+      color: var(--muted);
+      letter-spacing: .02em;
+    }
   </style>
 </head>
 <body>
@@ -272,7 +323,7 @@ static std::string html_page() {
       </div>
 
       <div style="margin-top:10px; color:var(--muted); font-size:12px;">
-        Chart is <b>OHLC</b> aggregated client-side from trades.
+        Ladder is centered on the spread (best bid/ask) with <b>cumulative depth</b>.
       </div>
     </div>
 
@@ -317,10 +368,12 @@ static std::string html_page() {
         <h2>Order Book (L2 Ladder)</h2>
         <div class="ladder">
           <div class="ladderHead">
-            <div class="cell">Bid Qty</div>
+            <div class="cell right">Bid Cum</div>
+            <div class="cell right">Bid Qty</div>
             <div class="cell right">Bid Px</div>
             <div class="cell">Ask Px</div>
-            <div class="cell right">Ask Qty</div>
+            <div class="cell">Ask Qty</div>
+            <div class="cell">Ask Cum</div>
           </div>
           <div id="ladderBody"></div>
         </div>
@@ -359,7 +412,7 @@ async function apiPostForm(url, params){
 }
 
 // ---------------- Tape (client-side trade history) ----------------
-const state = { tape: [], lastTradeId: 0, lastDepthTs: 0 };
+const state = { tape: [], lastTradeId: 0 };
 
 function updateTape(recent){
   if(!Array.isArray(recent)) return;
@@ -443,8 +496,9 @@ function buildCandles(trades, nowNs, windowNs, intervalNs){
 // ---------------- Chart rendering ----------------
 function drawGrid(ctx, w, h, padL, padR, padT, padB){
   ctx.save();
-  ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--bg').trim();
-  ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--grid').trim();
+  const css = getComputedStyle(document.documentElement);
+  ctx.fillStyle = css.getPropertyValue('--bg').trim();
+  ctx.strokeStyle = css.getPropertyValue('--grid').trim();
   ctx.lineWidth = 1;
   ctx.fillRect(0,0,w,h);
 
@@ -471,7 +525,7 @@ function drawCandles(candles){
   const text = css.getPropertyValue('--muted2').trim();
   const up = css.getPropertyValue('--up').trim();
   const down = css.getPropertyValue('--down').trim();
-  const wick = css.getPropertyValue('--wick').trim();
+  const wick = css.getPropertyValue('--muted').trim();
 
   const padL = 52, padR = 10, padT = 10, padB = 22;
   drawGrid(ctx, w, h, padL, padR, padT, padB);
@@ -544,7 +598,7 @@ function setTradesTable(trades){
   tbody.innerHTML = "";
   if(!Array.isArray(trades)) return;
 
-  const xs = trades.slice().reverse().slice(0, 22); // slightly calmer
+  const xs = trades.slice().reverse().slice(0, 22);
   for(const t of xs){
     const tr = document.createElement("tr");
     tr.innerHTML = `
@@ -558,49 +612,125 @@ function setTradesTable(trades){
   }
 }
 
-function renderLadder(depth){
+function fmtInt(x){
+  if(x==null) return "";
+  const n = Number(x);
+  if(!isFinite(n)) return "";
+  return String(Math.trunc(n));
+}
+
+function renderLadderB3(depth, snap){
   const body = $("ladderBody");
   body.innerHTML = "";
 
   const bids = Array.isArray(depth.bids) ? depth.bids : [];
   const asks = Array.isArray(depth.asks) ? depth.asks : [];
 
-  const n = Math.max(bids.length, asks.length);
-  if(n === 0){
+  // We center on the spread: show asks (top), then spread row, then bids (bottom).
+  const nAsks = asks.length;
+  const nBids = bids.length;
+
+  if(nAsks === 0 && nBids === 0){
     body.innerHTML = `<div style="padding:10px;" class="mono muted">no depth yet</div>`;
     return;
   }
 
-  let maxQty = 1;
-  for(const b of bids) maxQty = Math.max(maxQty, Number(b.qty||0));
-  for(const a of asks) maxQty = Math.max(maxQty, Number(a.qty||0));
+  // cumulative depth from the inside out (best -> deeper)
+  const askCum = [];
+  let acc = 0;
+  for(let i=0;i<nAsks;i++){
+    acc += Number(asks[i].qty||0);
+    askCum.push(acc);
+  }
 
-  for(let i=0;i<n;i++){
-    const b = bids[i];
+  const bidCum = [];
+  acc = 0;
+  for(let i=0;i<nBids;i++){
+    acc += Number(bids[i].qty||0);
+    bidCum.push(acc);
+  }
+
+  const maxCum = Math.max(1, ...askCum, ...bidCum);
+
+  const bestBid = snap.best_bid;
+  const bestAsk = snap.best_ask;
+
+  // render asks (best ask first at top)
+  for(let i=0;i<nAsks;i++){
     const a = asks[i];
+    const px = a.price;
+    const qty = a.qty;
+    const cum = askCum[i];
 
-    const bidPx = (b && b.price!=null) ? b.price : "";
-    const bidQty = (b && b.qty!=null) ? b.qty : "";
-    const askPx = (a && a.price!=null) ? a.price : "";
-    const askQty = (a && a.qty!=null) ? a.qty : "";
-
-    const bidW = (b && b.qty!=null) ? Math.max(0, Math.min(1, Number(b.qty)/maxQty)) : 0;
-    const askW = (a && a.qty!=null) ? Math.max(0, Math.min(1, Number(a.qty)/maxQty)) : 0;
+    const isBest = (bestAsk!=null && px === bestAsk);
 
     const row = document.createElement("div");
-    row.className = "ladderRow";
+    row.className = "ladderRow" + (isBest ? " bestRow" : "");
+
+    const w = Math.max(0, Math.min(1, cum / maxCum));
+    row.innerHTML = `
+      <div class="cell right mono muted">${""}</div>
+      <div class="cell right mono muted">${""}</div>
+      <div class="cell right mono muted">${""}</div>
+
+      <div class="cell mono pxAsk">${fmtInt(px)}</div>
+      <div class="cell mono">
+        <div class="bar ask" style="width:${Math.floor(w*100)}%;"></div>
+        ${fmtInt(qty)}
+      </div>
+      <div class="cell mono muted">${fmtInt(cum)}</div>
+    `;
+    body.appendChild(row);
+  }
+
+  // spread / mid row
+  {
+    const row = document.createElement("div");
+    row.className = "ladderRow spreadRow";
+
+    const bb = (bestBid==null) ? null : Number(bestBid);
+    const ba = (bestAsk==null) ? null : Number(bestAsk);
+    let spread = null;
+    if(bb!=null && ba!=null) spread = ba - bb;
+
+    const mid = snap.mid;
 
     row.innerHTML = `
+      <div class="cell right mono centerNote">${""}</div>
+      <div class="cell right mono centerNote">${""}</div>
+      <div class="cell right mono centerNote">${bb==null ? "-" : fmtInt(bb)}</div>
+
+      <div class="cell mono centerNote">${ba==null ? "-" : fmtInt(ba)}</div>
+      <div class="cell mono centerNote">spread ${spread==null ? "-" : fmtInt(spread)}</div>
+      <div class="cell mono centerNote">mid ${mid==null ? "-" : fmtInt(mid)}</div>
+    `;
+    body.appendChild(row);
+  }
+
+  // render bids (best bid first just below spread)
+  for(let i=0;i<nBids;i++){
+    const b = bids[i];
+    const px = b.price;
+    const qty = b.qty;
+    const cum = bidCum[i];
+
+    const isBest = (bestBid!=null && px === bestBid);
+
+    const row = document.createElement("div");
+    row.className = "ladderRow" + (isBest ? " bestRow" : "");
+
+    const w = Math.max(0, Math.min(1, cum / maxCum));
+    row.innerHTML = `
+      <div class="cell right mono muted">${fmtInt(cum)}</div>
       <div class="cell right mono">
-        <div class="bar bid" style="width:${Math.floor(bidW*100)}%;"></div>
-        ${bidQty}
+        <div class="bar bid" style="width:${Math.floor(w*100)}%;"></div>
+        ${fmtInt(qty)}
       </div>
-      <div class="cell right mono pxBid">${bidPx}</div>
-      <div class="cell mono pxAsk">${askPx}</div>
-      <div class="cell mono">
-        <div class="bar ask" style="width:${Math.floor(askW*100)}%;"></div>
-        <span style="margin-left:auto;">${askQty}</span>
-      </div>
+      <div class="cell right mono pxBid">${fmtInt(px)}</div>
+
+      <div class="cell mono muted">${""}</div>
+      <div class="cell mono muted">${""}</div>
+      <div class="cell mono muted">${""}</div>
     `;
     body.appendChild(row);
   }
@@ -628,8 +758,8 @@ async function refresh(){
     // depth (L2 ladder)
     const levels = Number($("depthSel").value || 5);
     const depth = await apiGet("/api/depth?levels=" + encodeURIComponent(levels));
-    renderLadder(depth);
-    $("ladderMeta").textContent = `levels=${levels}  max_qty=${depth.max_qty ?? "-"}`;
+    renderLadderB3(depth, snap);
+    $("ladderMeta").textContent = `asks=${(depth.asks||[]).length}  bids=${(depth.bids||[]).length}  levels=${levels}  max_cum=${depth.max_cum ?? "-"}`;
 
   }catch(e){
     $("topline").textContent = "error: " + e;
@@ -696,13 +826,12 @@ int main(int argc, char** argv) {
   if (argc > 1) port = std::atoi(argv[1]);
   if (argc > 2) seed = static_cast<uint64_t>(std::strtoull(argv[2], nullptr, 10));
 
-  // Make a long horizon so it runs "forever" for the gateway session.
-  const double horizon_seconds = 3600.0 * 24.0 * 365.0; // ~1 year sim time
+  // long horizon to behave "live"
+  const double horizon_seconds = 3600.0 * 24.0 * 365.0;
 
   msim::RulesConfig rcfg{};
   msim::MatchingEngine eng{msim::RuleSet(rcfg)};
   msim::LiveWorld world{std::move(eng)};
-
   world.start(seed, horizon_seconds);
 
   httplib::Server svr;
@@ -742,28 +871,36 @@ int main(int argc, char** argv) {
     res.set_content(oss.str(), "application/json");
   });
 
-  // New: Depth endpoint for L2 ladder
+  // B3: Depth endpoint returns top-N + max_cum for scaling
   svr.Get("/api/depth", [&](const httplib::Request& req, httplib::Response& res) {
     std::size_t levels = 5;
     if (req.has_param("levels")) {
       try {
         const auto v = std::stoull(req.get_param_value("levels"));
         if (v > 0 && v <= 200) levels = static_cast<std::size_t>(v);
-      } catch (...) { /* ignore */ }
+      } catch (...) {
+      }
     }
 
-    // LiveWorld API
     auto d = world.book_depth(levels);
 
-    // We assume d.bids / d.asks are vectors of some DepthLevel type
-    // Serialize as {bids:[{price,qty,orders}], asks:[...], max_qty:...}
-    long long max_qty = 1;
-    for (const auto& x : d.bids) max_qty = std::max(max_qty, level_qty_(x));
-    for (const auto& x : d.asks) max_qty = std::max(max_qty, level_qty_(x));
+    long long max_cum = 1;
+    {
+      long long acc = 0;
+      for (const auto& x : d.asks) {
+        acc += level_qty_(x);
+        max_cum = std::max(max_cum, acc);
+      }
+      acc = 0;
+      for (const auto& x : d.bids) {
+        acc += level_qty_(x);
+        max_cum = std::max(max_cum, acc);
+      }
+    }
 
     std::ostringstream oss;
     oss << "{";
-    oss << "\"max_qty\":" << max_qty << ",";
+    oss << "\"max_cum\":" << max_cum << ",";
     oss << "\"bids\":[";
     for (std::size_t i = 0; i < d.bids.size(); ++i) {
       const auto& x = d.bids[i];
@@ -794,11 +931,11 @@ int main(int argc, char** argv) {
   svr.Post("/api/order", [&](const httplib::Request& req, httplib::Response& res) {
     const auto side_s = req.has_param("side") ? req.get_param_value("side") : "Buy";
     const auto type_s = req.has_param("type") ? req.get_param_value("type") : "Limit";
-    const auto tif_s  = req.has_param("tif")  ? req.get_param_value("tif")  : "GTC";
+    const auto tif_s  = req.has_param("tif") ? req.get_param_value("tif") : "GTC";
 
-    const auto id_ll    = get_ll(req, "id", 0);
+    const auto id_ll = get_ll(req, "id", 0);
     const auto price_ll = get_ll(req, "price", 100);
-    const auto qty_ll   = get_ll(req, "qty", 1);
+    const auto qty_ll = get_ll(req, "qty", 1);
 
     msim::Order o{};
     o.owner = static_cast<msim::OwnerId>(999);
@@ -807,8 +944,8 @@ int main(int argc, char** argv) {
     o.side = (side_s == "Sell") ? msim::Side::Sell : msim::Side::Buy;
     o.type = (type_s == "Market") ? msim::OrderType::Market : msim::OrderType::Limit;
     o.tif  = (tif_s == "IOC") ? msim::TimeInForce::IOC
-             : (tif_s == "FOK") ? msim::TimeInForce::FOK
-                                : msim::TimeInForce::GTC;
+           : (tif_s == "FOK") ? msim::TimeInForce::FOK
+                              : msim::TimeInForce::GTC;
 
     o.price = static_cast<msim::Price>(price_ll);
     o.qty   = static_cast<msim::Qty>(qty_ll);
