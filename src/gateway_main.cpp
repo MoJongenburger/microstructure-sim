@@ -1,14 +1,19 @@
 #include <algorithm>
+#include <array>
+#include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <optional>
+#include <random>
 #include <sstream>
 #include <string>
 #include <type_traits>
 #include <utility>
 #include <vector>
+#include <thread>
 
 #include "httplib.h"
 
@@ -132,6 +137,189 @@ static void set_no_cache(httplib::Response& res) {
   res.set_header("Pragma", "no-cache");
 }
 
+// ---------------- Synthetic flow (MM ladder + aggressors) ----------------
+static msim::OrderId make_oid_(msim::OwnerId owner, std::uint32_t seq) noexcept {
+  const std::uint64_t hi = (static_cast<std::uint64_t>(owner) & 0xFFFF'FFFFull) << 32;
+  const std::uint64_t lo = static_cast<std::uint64_t>(seq);
+  return static_cast<msim::OrderId>(hi | lo);
+}
+
+struct FlowThreads {
+  std::atomic<bool> running{true};
+  std::thread fundamental_thread{};
+  std::thread mm_thread{};
+  std::vector<std::thread> aggressors{};
+};
+
+static FlowThreads start_background_flow(msim::LiveWorld& world,
+                                        const msim::RulesConfig& rcfg,
+                                        std::uint64_t seed) {
+  FlowThreads ft{};
+
+  // ---- Tunables (safe defaults) ----
+  constexpr std::size_t MM_LEVELS = 5;           // L2 ladder depth to maintain
+  constexpr msim::Qty   MM_QTY_L1 = 50'000;      // big top level so each market order is usually 1 trade
+  constexpr msim::Qty   MM_QTY_STEP = 10'000;    // decrement per deeper level
+  constexpr int         MM_REFRESH_MS = 250;     // how often to re-quote ladder
+
+  constexpr int AGGRESSOR_THREADS = 2;
+  constexpr int AGGRESSOR_SLEEP_MS = 2;          // 2ms => ~500 orders/sec per thread (~1000 total)
+  constexpr msim::Qty AGGR_MIN_Q = 1;
+  constexpr msim::Qty AGGR_MAX_Q = 25;
+
+  // "Price moves every 3–6 seconds" via a small fundamental random walk
+  constexpr int FUND_MIN_MS = 3000;
+  constexpr int FUND_MAX_MS = 6000;
+  constexpr int FUND_STEP_TICKS = 1;             // +/- 1 tick per update
+
+  const msim::Price tick = std::max<msim::Price>(1, static_cast<msim::Price>(rcfg.tick_size_ticks));
+  std::atomic<long long> fundamental_px{100}; // in "Price units" (already ticks in this simulator)
+
+  // ---- Fundamental updater ----
+  ft.fundamental_thread = std::thread([&ft, &fundamental_px, seed, tick]() {
+    std::mt19937_64 rng(seed ^ 0xA5A5A5A5A5A5A5A5ull);
+    std::uniform_int_distribution<int> sleep_ms(FUND_MIN_MS, FUND_MAX_MS);
+    std::uniform_int_distribution<int> dir(-1, 1);
+
+    while (ft.running.load(std::memory_order_relaxed)) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms(rng)));
+      const int d = dir(rng);
+      long long px = fundamental_px.load(std::memory_order_relaxed);
+      px += static_cast<long long>(d) * static_cast<long long>(FUND_STEP_TICKS) * static_cast<long long>(tick);
+      if (px < static_cast<long long>(tick)) px = static_cast<long long>(tick);
+      fundamental_px.store(px, std::memory_order_relaxed);
+    }
+  });
+
+  // ---- Market maker ladder ----
+  ft.mm_thread = std::thread([&ft, &world, &fundamental_px, seed, tick]() {
+    constexpr msim::OwnerId MM_OWNER = static_cast<msim::OwnerId>(2);
+    std::uint32_t seq = 1;
+
+    std::array<msim::OrderId, MM_LEVELS> bid_ids{};
+    std::array<msim::OrderId, MM_LEVELS> ask_ids{};
+    bid_ids.fill(static_cast<msim::OrderId>(0));
+    ask_ids.fill(static_cast<msim::OrderId>(0));
+
+    // small RNG for tiny random “jitter” so it’s not totally mechanical
+    std::mt19937_64 rng(seed ^ 0xC0FFEEull);
+    std::uniform_int_distribution<int> jitter(-1, 1);
+
+    while (ft.running.load(std::memory_order_relaxed)) {
+      // cancel previous ladder (ignore failures: might be filled)
+      for (std::size_t i = 0; i < MM_LEVELS; ++i) {
+        if (bid_ids[i] != 0) (void)live_cancel_(world, bid_ids[i]);
+        if (ask_ids[i] != 0) (void)live_cancel_(world, ask_ids[i]);
+        bid_ids[i] = 0;
+        ask_ids[i] = 0;
+      }
+
+      const long long fpx_ll = fundamental_px.load(std::memory_order_relaxed);
+      const msim::Price fpx = static_cast<msim::Price>(std::max<long long>(static_cast<long long>(tick), fpx_ll));
+
+      // Build a symmetric ladder around fundamental: bids below, asks above
+      for (std::size_t lvl = 0; lvl < MM_LEVELS; ++lvl) {
+        const msim::Price off = static_cast<msim::Price>((static_cast<long long>(lvl) + 1LL) * static_cast<long long>(tick));
+        const msim::Price j   = static_cast<msim::Price>(jitter(rng) * static_cast<int>(tick));
+
+        msim::Qty qty = static_cast<msim::Qty>(
+          std::max<long long>(
+            1LL,
+            static_cast<long long>(MM_QTY_L1) - static_cast<long long>(MM_QTY_STEP) * static_cast<long long>(lvl)
+          )
+        );
+
+        // Bid
+        {
+          msim::Order b{};
+          b.owner = MM_OWNER;
+          b.id    = make_oid_(MM_OWNER, seq++);
+          b.side  = msim::Side::Buy;
+          b.type  = msim::OrderType::Limit;
+          msim::Price px = static_cast<msim::Price>(fpx - off + j);
+          if (px < tick) px = tick;
+          b.price = px;
+          b.qty   = qty;
+          b.tif   = msim::TimeInForce::GTC;
+
+          (void)world.submit_order(b);
+          bid_ids[lvl] = b.id;
+        }
+
+        // Ask
+        {
+          msim::Order a{};
+          a.owner = MM_OWNER;
+          a.id    = make_oid_(MM_OWNER, seq++);
+          a.side  = msim::Side::Sell;
+          a.type  = msim::OrderType::Limit;
+          msim::Price px = static_cast<msim::Price>(fpx + off + j);
+          if (px < tick) px = static_cast<msim::Price>(tick + off);
+          a.price = px;
+          a.qty   = qty;
+          a.tif   = msim::TimeInForce::GTC;
+
+          (void)world.submit_order(a);
+          ask_ids[lvl] = a.id;
+        }
+      }
+
+      std::this_thread::sleep_for(std::chrono::milliseconds(MM_REFRESH_MS));
+    }
+
+    // best-effort cleanup
+    for (std::size_t i = 0; i < MM_LEVELS; ++i) {
+      if (bid_ids[i] != 0) (void)live_cancel_(world, bid_ids[i]);
+      if (ask_ids[i] != 0) (void)live_cancel_(world, ask_ids[i]);
+    }
+  });
+
+  // ---- Aggressors (market orders that hit the ladder) ----
+  ft.aggressors.reserve(static_cast<std::size_t>(AGGRESSOR_THREADS));
+  for (int k = 0; k < AGGRESSOR_THREADS; ++k) {
+    ft.aggressors.emplace_back([&ft, &world, seed, k]() {
+      const msim::OwnerId OWNER = static_cast<msim::OwnerId>(100 + k);
+      std::uint32_t seq = 1;
+
+      std::mt19937_64 rng(seed ^ (0x1234ABCDull + static_cast<std::uint64_t>(k)));
+      std::uniform_int_distribution<int> side01(0, 1);
+      std::uniform_int_distribution<int> qdist(static_cast<int>(AGGR_MIN_Q), static_cast<int>(AGGR_MAX_Q));
+
+      while (ft.running.load(std::memory_order_relaxed)) {
+        msim::Order o{};
+        o.owner = OWNER;
+        o.id    = make_oid_(OWNER, seq++);
+        o.side  = (side01(rng) == 0) ? msim::Side::Buy : msim::Side::Sell;
+        o.type  = msim::OrderType::Market;
+        o.tif   = msim::TimeInForce::IOC;
+        o.price = 0;
+        o.qty   = static_cast<msim::Qty>(qdist(rng));
+
+        // If your Order struct has market-style, set it (present in your project)
+        if constexpr (requires(msim::Order x) { x.mkt_style = msim::MarketStyle::PureMarket; }) {
+          o.mkt_style = msim::MarketStyle::PureMarket;
+        }
+
+        (void)world.submit_order(o);
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(AGGRESSOR_SLEEP_MS));
+      }
+    });
+  }
+
+  return ft;
+}
+
+static void stop_background_flow(FlowThreads& ft) {
+  ft.running.store(false, std::memory_order_relaxed);
+  if (ft.fundamental_thread.joinable()) ft.fundamental_thread.join();
+  if (ft.mm_thread.joinable()) ft.mm_thread.join();
+  for (auto& t : ft.aggressors) {
+    if (t.joinable()) t.join();
+  }
+}
+
+// ---------------- main ----------------
 int main(int argc, char** argv) {
   // args: [port] [seed]
   int port = 8080;
@@ -148,7 +336,21 @@ int main(int argc, char** argv) {
   msim::LiveWorld world{std::move(eng)};
   world.start(seed, horizon_seconds);
 
+  // Start background flow (MM ladder + aggressors)
+  FlowThreads flow = start_background_flow(world, rcfg, seed);
+
   httplib::Server svr;
+
+  // Optional: allow typing "exit" to shutdown cleanly
+  std::thread stdin_thread([&]() {
+    std::string line;
+    while (std::getline(std::cin, line)) {
+      if (line == "exit" || line == "quit") {
+        svr.stop();
+        break;
+      }
+    }
+  });
 
   // ---- Static files from ./web ----
   svr.Get("/", [&](const httplib::Request&, httplib::Response& res) {
@@ -293,6 +495,15 @@ int main(int argc, char** argv) {
     o.price = static_cast<msim::Price>(price_ll);
     o.qty   = static_cast<msim::Qty>(qty_ll);
 
+    if (o.type == msim::OrderType::Market) {
+      o.price = 0;
+      if constexpr (requires(msim::Order x) { x.mkt_style = msim::MarketStyle::PureMarket; }) {
+        o.mkt_style = msim::MarketStyle::PureMarket;
+      }
+      // Market orders should generally be IOC in exchange-style sims
+      if (o.tif == msim::TimeInForce::GTC) o.tif = msim::TimeInForce::IOC;
+    }
+
     const auto ack = world.submit_order(o);
 
     const bool accepted = ack_accepted_(ack);
@@ -328,11 +539,17 @@ int main(int argc, char** argv) {
 
   std::cout << "MSIM gateway listening on http://localhost:" << port << "/\n";
   std::cout << "Run from repo root so it can read: web/index.html, web/styles.css, web/app.js\n";
+  std::cout << "Type 'exit' (or 'quit') then press Enter to stop cleanly.\n";
 
   svr.listen("0.0.0.0", port);
+
+  // Clean shutdown
+  stop_background_flow(flow);
 
   if constexpr (requires { world.stop(); }) {
     world.stop();
   }
+
+  if (stdin_thread.joinable()) stdin_thread.join();
   return 0;
 }
